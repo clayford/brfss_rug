@@ -3,6 +3,7 @@
 
 library(foreign)
 library(survey)
+library(dplyr)
 library(ggplot2)
 
 # https://www.cdc.gov/brfss/
@@ -22,7 +23,8 @@ brfss <- read.xport("LLCP2015.XPT")
 # Ever told you have chronic obstructive pulmonary disease, emphysema or chronic bronchitis?
 # 1 = Yes, 2 = No, 7 = Not Sure, 9 = Refused
 prop.table(table(brfss$CHCCOPD1))
-# recode 2 (no) as 0
+# derive new var: COPD
+# recode 2 (no) as 0 and set 7 and 9 as NA
 brfss$COPD <- ifelse(brfss$CHCCOPD1==2, 0, brfss$CHCCOPD1)
 brfss$COPD <- factor(ifelse(brfss$COPD %in% c(7,9), NA, brfss$COPD), 
                      labels = c("No","Yes"))
@@ -30,8 +32,9 @@ table(brfss$COPD, useNA = "ifany")
 
 # X_RFSMOK3
 # Adults who are current smokers (1 = no, 2 = yes, 9 = Don't know/Refused/Missing)
-prop.table(table(brfss$X_RFSMOK3))
-# set as factor
+table(brfss$X_RFSMOK3)
+# derive new var: SMOKE
+# set 9 to NA and make factor
 brfss$SMOKE <- ifelse(brfss$X_RFSMOK3 == 9, NA, brfss$X_RFSMOK3)
 brfss$SMOKE <- factor(brfss$SMOKE, labels = c("No", "Yes"))
 table(brfss$SMOKE, useNA = "ifany")
@@ -41,6 +44,7 @@ table(brfss$SMOKE, useNA = "ifany")
 # 1 = White, 2 = Black, 3 = Hispanic, 4 = Other race only, Non-Hispanic,
 # 5 = Multiracial, Non-Hispanic, BLANK = Don't know/Not sure/Refused 
 table(brfss$X_RACE_G1, useNA = "ifany")
+# derive new var: RACE
 # create 4 groups
 brfss$RACE <- ifelse(brfss$X_RACE_G1 %in% c(4,5), 4, brfss$X_RACE_G1)
 brfss$RACE <- factor(brfss$RACE, labels = c("White","Black","Hispanic","Other"))
@@ -48,12 +52,15 @@ table(brfss$RACE, useNA = "ifany")
 
 # X_AGE_G
 # Imputed age in six groups
-# 18-24, 25-34, 35-44, 45-54, 55-64, 65+
+# 1 = 18-24, 2 = 25-34, 3 = 35-44, 4 = 45-54, 5 = 55-64, 6 = 65+
 table(brfss$X_AGE_G)
+# derive new var: AGEG4
+# create 4 groups (collapse 2/3 and 4/5 into one group, respectively)
 brfss$AGEG4 <- ifelse(brfss$X_AGE_G %in% c(2,3), 2, brfss$X_AGE_G) 
 brfss$AGEG4 <- ifelse(brfss$AGEG4 %in% c(4,5), 3, brfss$AGEG4) 
 brfss$AGEG4 <- factor(brfss$AGEG4, 
                     labels = c("18-24", "25-44", "45-64", "65+"))
+table(brfss$AGEG4)
 
 # create survey design object
 
@@ -68,6 +75,10 @@ brfss.svy <- svydesign(ids = ~X_PSU,           # Primary Sampling Unit
                        data = brfss)
 brfss.svy
 
+# Number of unique strata per State
+brfss %>% group_by(X_STATE) %>% 
+  summarise(strata = length(unique(X_STSTR))) %>% 
+  as.data.frame()
 
 # analysis example 1 ------------------------------------------------------
 
@@ -75,15 +86,14 @@ brfss.svy
 # https://nccd.cdc.gov/s_broker/WEATSQL.exe/weat/index.hsql
 
 # Model "Ever diagnosed with Chronic Obstructive Pulmonary Disease or COPD, 
-# emphysema or chronic bronchitis" as a function of "Adults who are current
-# smokers" for Virginia and Four level race/ethnicity category (computed)
-
-# cond <- expression(X_STATE==51 & X_RFSMOK3 != "NA" & CHCCOPD1 %in% c(0,1))
+# emphysema or chronic bronchitis" as a function of "Adults who are current 
+# smokers" for Virginia, Four level race/ethnicity category (computed) and
+# Reported age (18-24,25-44,45-64,65+)
 
 sm1 <- svyglm(COPD ~ SMOKE + RACE + AGEG4, 
               design = brfss.svy, 
-              subset= X_STATE == 51, 
-              family=quasibinomial())
+              subset = X_STATE == 51, 
+              family = quasibinomial)
 sm1.summary <- summary(sm1)
 sm1.summary
 
@@ -91,7 +101,7 @@ sm1.summary
 round(exp(confint(sm1, method="Wald")),2)
 
 
-# predicted probability of answering Yes given race and whether you smoke 
+# expected proportion of answering Yes given other variables
 nd <- expand.grid(SMOKE = c("No","Yes"), 
                   RACE = c("White","Black","Hispanic","Other"),
                   AGEG4 = c("18-24", "25-44", "45-64", "65+"))
@@ -119,8 +129,8 @@ p + scale_y_continuous(trans = scales::probability_trans("logis"))
 # fit interactionS, something we cannot do with WEAT
 sm2 <- svyglm(COPD ~ SMOKE + RACE + AGEG4 + SMOKE:AGEG4 + SMOKE:RACE, 
               design = brfss.svy, 
-              subset= X_STATE==51, 
-              family=quasibinomial())
+              subset = X_STATE==51, 
+              family = quasibinomial)
 sm2.summary <- summary(sm2)
 sm2.summary
 # are interactions significant?
@@ -150,53 +160,49 @@ ggplot(p.out2, aes(x = SMOKE, y = response, group = RACE, color = RACE)) +
   scale_y_continuous(trans = scales::probability_trans("logis"))
 
 # why the errors? Hispanics less likely to have COPD if they smoke?
-xtabs(~ RACE + COPD + SMOKE, brfss,
+xtabs(~ AGEG4 + RACE + SMOKE + COPD, brfss,
       subset = X_STATE == 51)
 
 
-tab <- svymean(~interaction(RACE, SMOKE, AGEG4, drop = TRUE),
-               design = subset(brfss.svy, X_STATE==51 & COPD == "Yes"),
-               na.rm = TRUE)
-
-round(tab, 2)
-ftab <- ftable(tab, rownames = list(SMOKE = c("No","Yes"),
-                                    RACE = c("White","Black","Hispanic","Other"), 
-                            AGEG4 = c("18-24", "25-44", "45-64", "65+")))
-print(ftab, digits= 2)
-
-
 # Does it matter whether or not we incorporate survey design?
+
 # Fit model using raw data (without survey design)
-m2 <- glm(COPD ~ SMOKE + RACE + AGEG4 + SMOKE:AGEG4 + SMOKE:RACE, 
+glm1 <- glm(COPD ~ SMOKE + RACE + AGEG4, 
               data = brfss, 
               subset= X_STATE==51, 
-              family=binomial())
-m2.summary <- summary(m2)
+              family=binomial)
+glm1.summary <- summary(glm1)
 
-round(cbind(sm2.summary$coefficients[,1:2], 
-            m2.summary$coefficients[,1:2]),
+# Fit model using raw data allowing a random effect at level of strata
+library(lme4)
+glmer1 <- glmer(COPD ~ SMOKE + RACE + AGEG4 + (1|X_STSTR),
+                data = brfss,
+                subset= X_STATE==51,
+                family=binomial)
+glmer1.summary <- summary(glmer1)
+
+
+round(cbind(svyglm = sm1.summary$coefficients[,1], 
+            glm = glm1.summary$coefficients[,1],
+            glmer = glmer1.summary$coefficients[,1]),
       3)
 
 # Visualize with a coefficient plot
-m2c <- data.frame(coef=rownames(m2.summary$coefficients),
-                  m2.summary$coefficients[,1:2],
-                  model = "glm",row.names = NULL)
-sm2c <- data.frame(coef=rownames(sm2.summary$coefficients),
-                  sm2.summary$coefficients[,1:2],
-                  model = "svyglm",row.names = NULL)
-cdat <- rbind(m2c, sm2c)
+glm1c <- data.frame(coef=rownames(glm1.summary$coefficients),
+                    glm1.summary$coefficients[,1:2],
+                    model = "glm",row.names = NULL)
+glmer1c <- data.frame(coef=rownames(glmer1.summary$coefficients),
+                      glmer1.summary$coefficients[,1:2],
+                      model = "glmer",row.names = NULL)
+sm1c <- data.frame(coef=rownames(sm1.summary$coefficients),
+                   sm1.summary$coefficients[,1:2],
+                   model = "svyglm",row.names = NULL)
 
-# First try
-ggplot(cdat, aes(y=Estimate, x = coef, color=model)) +
-  geom_abline(intercept = 0, slope = 0) +
-  geom_point(position = pd) +
-  geom_errorbar(aes(ymin=Estimate - Std..Error, 
-                    ymax=Estimate + Std..Error),
-                width=0.1, position = pd) +
-  coord_flip()
+cdat <- rbind(glm1c, glmer1c, sm1c)
 
+# coefficient plot
 # remove obs with large SEs and intercept
-ggplot(subset(cdat, !coef %in% c("SMOKEYes:RACEHispanic", "(Intercept)")), 
+ggplot(subset(cdat, coef != "(Intercept)"), 
        aes(y=Estimate, x = coef, color=model)) +
   geom_abline(intercept = 0, slope = 0) +
   geom_point(position = pd) +
@@ -204,6 +210,8 @@ ggplot(subset(cdat, !coef %in% c("SMOKEYes:RACEHispanic", "(Intercept)")),
                     ymax=Estimate + Std..Error),
                 width=0.1, position = pd) +
   coord_flip()
+
+
 
 
 save.image(file = "brfss2015.Rdata")
